@@ -185,7 +185,7 @@ npm run dev
 项目自带一套不依赖浏览器和测试框架的冒烟测试（用 esbuild 把 TS 入口打成单文件后在 Node 里跑）：
 
 ```bash
-npm run smoke        # 24 项端到端逻辑断言
+npm run smoke        # 46 项逻辑断言
 npm run smoke:ssr    # 服务端渲染整棵组件树，捕获模板与 ref 解包错误
 npm run verify       # 类型检查 + 构建 + 上面两项，提交前一键跑完
 ```
@@ -198,6 +198,8 @@ npm run verify       # 类型检查 + 构建 + 上面两项，提交前一键跑
 - 每条结论都绑定了真实来源
 - 正文里的引用编号全部合法，**没有一个幻觉编号**
 - 参考列表被自动拼接、附录与质检评分存在
+- 检索层三个后端（博查 / Tavily / Serper）的字段映射、URL 去重与错误分支——用假响应验证，不需要真实 key
+- Supabase 配置误配会被拦下（数据库连接串 / 缺协议头 / 缺 key / 非 http 协议），防止「配错一个环境变量就整页白屏」
 
 ---
 
@@ -247,6 +249,26 @@ npm run verify       # 类型检查 + 构建 + 上面两项，提交前一键跑
    - `anon public` key → 形如 `eyJhbGciOi...`
 
 > `anon key` 是设计上就要暴露给浏览器的（它只是「匿名角色标识」），真正的权限控制在数据库的 RLS 策略里。这是 Supabase 的标准做法。
+
+> **⚠️ 最容易踩的坑：别把「数据库连接串」当成 Project URL。**
+>
+> Supabase 控制台里有两个看起来都像「地址」的东西，只有第一个能用：
+>
+> | 位置 | 形如 | 用作 `VITE_SUPABASE_URL` |
+> | --- | --- | --- |
+> | Project Settings → **API** → Project URL | `https://abcdefgh.supabase.co` | ✅ 就是它 |
+> | Project Settings → **Database** → Connection string | `postgresql://postgres:***@db.abcdefgh.supabase.co:5432/postgres` | ❌ **绝对不要** |
+>
+> 填错的后果有两层：
+> 1. **整页白屏**。该值不是 HTTP(S) URL，`createClient()` 会抛 `Invalid supabaseUrl`；而首屏渲染会调用
+>    `knowledgeMode()`，异常一路冒泡到渲染函数，最终 `#app` 里只剩一个空注释节点。这正是本项目
+>    上线时真实踩过的坑 —— 页面纯白、无任何提示，很容易误判成"部署失败"。
+> 2. **数据库密码泄露**。Connection string 含明文密码 `postgres:<password>`，而 `VITE_` 前缀的变量
+>    会在**构建期内联进公开的 JS bundle**，任何人打开 F12 就能读到。
+>    **一旦误填，请立刻去 `Database → Settings` 重置数据库密码。**
+>
+> 项目已针对此加固：非法 URL 会被判定为「Supabase 未启用」并自动降级到浏览器本地存储，
+> 不再白屏（见 `validateSupabaseConfig()` 与对应回归测试）。
 
 ### 4）写本地 .env（仅本地开发需要）
 
@@ -338,14 +360,21 @@ Netlify 站点 → **Site configuration → Environment variables → Add a vari
 | `TAVILY_API_KEY` | `tvly-...` | 可选，检索备选 |
 | `SERPER_API_KEY` | `...` | 可选，检索备选 |
 | `SEARCH_PROVIDER` | `bocha` / `tavily` / `serper` | 可选，留空则按优先级自动选择 |
-| `VITE_SUPABASE_URL` | Supabase Project URL | 可选 |
-| `VITE_SUPABASE_ANON_KEY` | Supabase anon key | 可选 |
+| `VITE_SUPABASE_URL` | Supabase **Project URL**（`https://xxx.supabase.co`，**不是** Database 连接串） | 可选 |
+| `VITE_SUPABASE_ANON_KEY` | Supabase **anon public** key | 可选 |
 | `LLM_MODEL` | `deepseek-chat` | 可选，默认已是该值 |
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | 可选 |
 
 > **检索只需配一个**。三家都填也行，会按 `Tavily > 博查 > Serper` 的顺序自动挑第一个有 key 的。
 
-> 注意 `VITE_` 前缀的两个变量会被打进前端产物（这是 Vite 的约定）。它们本身是公开信息，安全性由数据库 RLS 保证；其余密钥只在 Edge Function 里通过 `Netlify.env.get()` 读取，**不会进入前端产物**。
+> ⚠️ **`VITE_SUPABASE_URL` 填错会白屏。** 它必须是 `https://` 开头的 Project URL。
+> 若误填成 Database Connection String（`postgresql://...`）或漏写协议头，应用会在首屏渲染时抛错。
+> 本项目已加固（非法值自动降级为本地存储、不再白屏），但填错仍意味着长期记忆/知识库不会落库。
+
+> 注意 `VITE_` 前缀的两个变量会在**构建期内联进前端产物**（这是 Vite 的约定）。所以**永远不要**把
+> 数据库连接串、service_role key 这类敏感值填进 `VITE_` 变量 —— 它们会被公开。正确做法是只用
+> `anon public` key + RLS 策略；其余密钥（DeepSeek / 博查）只在 Edge Function 里通过
+> `Netlify.env.get()` 读取，**不会进入前端产物**。
 
 ### 4）部署
 
@@ -471,6 +500,29 @@ A：**Netlify 的项目名就是这个站点的子域名，一个字符都不能
 想换成心仪的地址：**Project configuration → General**（部分界面在 `Domain management` 里）改项目名。若目标名字已被占用会直接报错，加个后缀即可（如 `industry-research-assistant`）。注意**改名后旧的 `*.netlify.app` 地址会失效**，简历、GitHub 仓库主页里的链接要同步更新。
 
 > 用 `curl` 从国内直连 Netlify 时可能偶发 `schannel: failed to receive handshake, SSL/TLS connection failed`——这是本地网络问题，不是站点故障。若手边有代理，加 `-x http://127.0.0.1:7890` 即可稳定重测。
+
+**Q：打开站点一片纯白、没有任何提示，是前端崩了吗？**
+
+A：先别怀疑前端。**用状态码把「部署问题」「访问控制问题」「运行时崩溃」三者分开**，顺序不要反：
+
+1. `curl -sD - -o /dev/null https://你的地址` —— **404** 是地址不对；**401** 是 Netlify 访问控制（见上一问）；**200 却空白**才是真的运行时问题。
+2. 200 且空白时，按 `F12` 看 **Console**。本项目真实踩过这个坑：`VITE_SUPABASE_URL` 被误填成数据库连接串（`postgresql://...`）→ `createClient()` 抛 `Invalid supabaseUrl` → 而 `knowledgeMode()` 在**首屏渲染时**被调用，异常冒泡到渲染函数 → `#app` 里只剩一个空注释节点 → 整页纯白。
+   **判据**：Console 里能看到 `Invalid supabaseUrl: Must be a valid HTTP or HTTPS URL.`
+   **修复**：去 Netlify 环境变量把它改成 Project URL（`https://xxx.supabase.co`），然后重新部署。
+
+   > ⚠️ 连接串里含**明文数据库密码**，而 `VITE_` 变量会被内联进公开的 JS bundle。若曾误填过，请立刻到 Supabase **Database → Settings 重置数据库密码**。
+
+3. 不想开浏览器也能自查。用无头 Chrome 直接把渲染结果 dump 出来，一步区分「框架没起来」和「起来了但没内容」：
+
+   ```bash
+   chrome --headless --dump-dom "https://你的地址/" | grep -o '<div id="app"[^>]*>.\{0,80\}'
+   ```
+
+   - 输出 `<div id="app" data-v-app=""><div class="app-frame">…` → **正常**
+   - 输出 `<div id="app" data-v-app=""><!----></div>` → **渲染失败**，回去看 Console
+
+项目现已针对此加固：Supabase 配置非法时会被判为「未启用」并降级到浏览器本地存储（不再崩溃）；
+万一仍有未预期异常，`#app` 为空时会显示一段可读的错误提示，而不是留给你一片白屏。
 
 **Q：设置面板里检索代理显示「未配置」，会怎样？**
 A：说明服务端三个检索 key 一个都没配。**博查 / Tavily / Serper 任配一个即可**，配完重新部署一次。三家都不配也不影响主流程——`web_search` 节点会自动切到内置演示语料，本地知识库链路照常工作，整条流水线仍然完整执行到底。

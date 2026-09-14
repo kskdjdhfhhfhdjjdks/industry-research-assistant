@@ -8,6 +8,7 @@
  *   4. 迭代补搜是否真的触发了第二轮
  *   5. 本地知识库（分片 / 向量 / 余弦检索）链路是否打通
  *   6. 检索层的多后端适配（博查 / Tavily / Serper 的字段映射与去重）
+ *   7. Supabase 环境变量误配是否会拖垮首屏渲染（防白屏回归）
  *
  * 运行方式见 package.json 的 smoke 脚本。
  */
@@ -20,6 +21,7 @@ import { hashEmbed, cosineSimilarity } from '../src/core/embedding'
 import { demoDocument } from '../src/core/demo'
 import { chunkText } from '../src/core/knowledge'
 import { webSearch, resetSearchState } from '../src/core/search'
+import { isSupabaseEnabled, validateSupabaseConfig } from '../src/core/config'
 import searchHandler from '../netlify/edge-functions/search'
 import type { AgentEvent } from '../src/core/types'
 import type { AppSettings } from '../src/core/config'
@@ -101,7 +103,43 @@ async function main(): Promise<void> {
   check('特征哈希向量维度', v1.length === 512, `维度 ${v1.length}`)
   check('向量相似度可区分语义', simNear > simFar, `近 ${simNear.toFixed(3)} > 远 ${simFar.toFixed(3)}`)
 
-  // 7. 本地知识库写入（无 Supabase → 走浏览器本地兜底）
+  // 7. Supabase 配置校验 —— 非法 URL 必须被拦下，否则首屏渲染会整页白屏
+  //    （真实故障：VITE_SUPABASE_URL 被填成 postgresql:// 连接串，
+  //      createClient 抛错冒泡到 render，最终只渲染出空注释节点）
+  const connString = 'postgresql://postgres:secret@db.abcdefgh.supabase.co:5432/postgres'
+  check(
+    'Supabase 配置：两项皆空 → 视为未配置',
+    validateSupabaseConfig('', '') === '未配置' && !isSupabaseEnabled(),
+    '',
+  )
+  check(
+    'Supabase 配置：合法 Project URL + key → 可用',
+    validateSupabaseConfig('https://abcdefgh.supabase.co', 'eyJhbGciOi') === '',
+    '',
+  )
+  const connIssue = validateSupabaseConfig(connString, 'eyJhbGciOi')
+  check(
+    'Supabase 配置：数据库连接串被判为误配（防白屏）',
+    connIssue.length > 0 && connIssue.includes('数据库连接串'),
+    connIssue,
+  )
+  check(
+    'Supabase 配置：缺协议头的域名被判为非法',
+    validateSupabaseConfig('abcdefgh.supabase.co', 'eyJhbGciOi').includes('不是合法'),
+    validateSupabaseConfig('abcdefgh.supabase.co', 'eyJhbGciOi'),
+  )
+  check(
+    'Supabase 配置：只有 URL 缺 key → 拒绝',
+    validateSupabaseConfig('https://abcdefgh.supabase.co', '').includes('VITE_SUPABASE_ANON_KEY'),
+    '',
+  )
+  check(
+    'Supabase 配置：非 http(s) 协议（如 ftp）→ 拒绝',
+    validateSupabaseConfig('ftp://example.com', 'eyJhbGciOi').length > 0,
+    validateSupabaseConfig('ftp://example.com', 'eyJhbGciOi'),
+  )
+
+  // 8. 本地知识库写入（无 Supabase → 走浏览器本地兜底）
   const ingest = await ingestDocument({ title: sample.title, content: sample.content, userId: settings.userId })
   check('知识库索引写入', ingest.chunks > 0, `${ingest.chunks} 片，存储=${ingest.storage}`)
 

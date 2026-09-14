@@ -7,7 +7,12 @@
  */
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import { SUPABASE_ANON_KEY, SUPABASE_URL, isSupabaseEnabled } from './config'
+import {
+  SUPABASE_ANON_KEY,
+  SUPABASE_URL,
+  isSupabaseEnabled,
+  supabaseConfigIssue,
+} from './config'
 
 let client: SupabaseClient | null = null
 let sessionUserId: string | null = null
@@ -16,15 +21,27 @@ let sessionError = ''
 export function getDb(): SupabaseClient | null {
   if (!isSupabaseEnabled()) return null
   if (!client) {
-    client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession: true, autoRefreshToken: true },
-    })
+    try {
+      client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: { persistSession: true, autoRefreshToken: true },
+      })
+    } catch (error) {
+      // createClient 对非法 URL / 空 key 会直接抛错。这里兜住并退化为
+      // 「未启用 Supabase」，避免异常冒泡到渲染层（曾导致整页白屏）。
+      sessionError = error instanceof Error ? error.message : 'Supabase 初始化失败'
+      client = null
+      return null
+    }
   }
   return client
 }
 
 export function dbStatus(): { enabled: boolean; userId: string; error: string } {
-  return { enabled: isSupabaseEnabled(), userId: sessionUserId ?? '', error: sessionError }
+  return {
+    enabled: isSupabaseEnabled(),
+    userId: sessionUserId ?? '',
+    error: sessionError || supabaseConfigIssue(),
+  }
 }
 
 /**
