@@ -349,6 +349,11 @@ Netlify 站点 → **Site configuration → Environment variables → Add a vari
 
 构建完成后你会拿到形如 `https://xxxx-yyyy.netlify.app` 的地址——这就是可以写进简历的链接。
 
+> ⚠️ **拿到链接后如果打开是 Netlify 登录页（HTTP 401），别去翻构建日志。**
+> 这是新版界面把项目可见性默认设成私有了，一行设置就能解开：
+> **Project configuration → General → Visitor access → Project visibility → Edit visibility → `Public` → Save**。
+> 详见第十一章 FAQ 中「部署成功了，但打开站点只看到一个 Netlify 登录页」。
+
 ### 5）（可选）自定义域名
 
 **Domain management → Add a domain**，可以用 `项目名.netlify.app` 改一个更清爽的子域名，或者绑定自己的域名。
@@ -425,6 +430,30 @@ A：说明 Edge Function 没读到 `DEEPSEEK_API_KEY`。检查两点：环境变
 
 **Q：报 401 / missing_key**
 A：同上。若你希望在演示模式之外使用自己的 key，点右上角「设置」填入 API Key，前端会自动降级为直连供应商。
+
+**Q：部署成功了，但打开站点只看到一个 Netlify 登录页（HTTP 401 / Login Redirect）**
+A：这是**部署阶段最容易卡住的一个坑，且与代码无关**——Netlify 把项目可见性设成了私有，访客必须登录 Netlify 才能打开站点。
+
+先确认是不是这个问题：`curl -sD - -o /dev/null https://你的站点.netlify.app`，若返回 **401**，且 HTML 源码里出现跳转地址 `app.netlify.com/edge-access`，就是它。
+
+修复路径（Credit-based Free / Personal / Pro 计划的新版界面，叫「项目可见性」）：
+
+> **Project configuration → General → Visitor access → Project visibility → Edit visibility → 选 `Public` → Save**
+
+如果菜单里显示的是旧版 `Password Protection`（Enterprise / Open Source / 旧计划），则走：
+
+> **Project configuration → Access & security → Visitor access → Password Protection → Configure Password Protection → 取消保护**
+
+顺手把**团队级默认值**也改掉，否则以后每新建一个项目都会是私有的：
+
+> **Team settings → Access & security → Visitor access → Default project visibility → `Public`**
+
+两个注意点：
+
+- **改完不需要重新部署**，这个设置是即时生效的。如果浏览器里仍是登录页，用**无痕窗口**验证——你自己已登录 Netlify，登录态会掩盖问题。
+- 旧版界面选项与新版的对应关系：`No protection settings → Public`、`Basic protection → Password`、`Team protection → Private`。
+
+> 排查思路值得记一下：先判断站点**是否存在**（404 = 域名没占用，401 = 站点存在但被拦），再看 401 的**响应体**指向哪里。`edge-access` 说明是访问控制，而不是构建失败——这一步区分开了"部署问题"和"权限问题"，避免去翻构建日志。
 
 **Q：设置面板里检索代理显示「未配置」，会怎样？**
 A：说明服务端三个检索 key 一个都没配。**博查 / Tavily / Serper 任配一个即可**，配完重新部署一次。三家都不配也不影响主流程——`web_search` 节点会自动切到内置演示语料，本地知识库链路照常工作，整条流水线仍然完整执行到底。
