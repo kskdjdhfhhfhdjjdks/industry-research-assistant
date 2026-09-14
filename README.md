@@ -4,6 +4,10 @@
 >
 > 前端 Vue 3 + TypeScript，服务端能力由 **Netlify Edge Functions** 提供，向量检索与长期记忆跑在 **Supabase pgvector** 免费层上。**零服务器、零数据库运维，点开链接即可使用。**
 
+**在线体验**：<https://insustry-research.netlify.app> ｜ **代码仓库**：<https://github.com/kskdjdhfhhfhdjjdks/industry-research-assistant>
+
+> 提示：项目名一旦在 Netlify 上重命名，上面的体验地址会随之变化，记得同步更新这里、简历和 GitHub 仓库主页。
+
 ---
 
 ## 目录
@@ -454,6 +458,19 @@ A：这是**部署阶段最容易卡住的一个坑，且与代码无关**——
 - 旧版界面选项与新版的对应关系：`No protection settings → Public`、`Basic protection → Password`、`Team protection → Private`。
 
 > 排查思路值得记一下：先判断站点**是否存在**（404 = 域名没占用，401 = 站点存在但被拦），再看 401 的**响应体**指向哪里。`edge-access` 说明是访问控制，而不是构建失败——这一步区分开了"部署问题"和"权限问题"，避免去翻构建日志。
+
+**Q：访问站点报 404 / 401，怎么先确认「我一直测的到底是不是我自己的地址」？**
+A：**Netlify 的项目名就是这个站点的子域名，一个字符都不能差**；而 `*.netlify.app` 的子域名是**全球先到先得**的——你想要的名字很可能已经被别人占走，于是你的站点其实挂在另一个名字下（真实案例：项目名少打一个字母，成了 `insustry-research`，而正确拼写的 `industry-research.netlify.app` 属于别人的私有站点，于是"改设置怎么都不生效"——因为改的和测的不是同一个项目）。
+
+三个动作确认，顺序别反：
+
+1. 打开 <https://app.netlify.com> 的 **Projects** 列表——每个项目下面都印着它自己的网址，**直接照抄，不要凭记忆手打**。
+2. `curl -sD - -o /dev/null https://你的地址` 看状态码：**404 = 该域名下没有站点（八成不是你）**、**401 = 域名存在但被访问控制拦住**、**200 = 正常**。
+3. 需要更严谨时，把 401 页面里回显的 `site_id=...` 拿去和你项目的 **Project ID**（Project configuration → General）比对，一致才是同一个站点。
+
+想换成心仪的地址：**Project configuration → General**（部分界面在 `Domain management` 里）改项目名。若目标名字已被占用会直接报错，加个后缀即可（如 `industry-research-assistant`）。注意**改名后旧的 `*.netlify.app` 地址会失效**，简历、GitHub 仓库主页里的链接要同步更新。
+
+> 用 `curl` 从国内直连 Netlify 时可能偶发 `schannel: failed to receive handshake, SSL/TLS connection failed`——这是本地网络问题，不是站点故障。若手边有代理，加 `-x http://127.0.0.1:7890` 即可稳定重测。
 
 **Q：设置面板里检索代理显示「未配置」，会怎样？**
 A：说明服务端三个检索 key 一个都没配。**博查 / Tavily / Serper 任配一个即可**，配完重新部署一次。三家都不配也不影响主流程——`web_search` 节点会自动切到内置演示语料，本地知识库链路照常工作，整条流水线仍然完整执行到底。
