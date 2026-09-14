@@ -7,6 +7,7 @@
  *   3. 引用校验与参考列表是否生效
  *   4. 迭代补搜是否真的触发了第二轮
  *   5. 本地知识库（分片 / 向量 / 余弦检索）链路是否打通
+ *   6. 检索层的多后端适配（博查 / Tavily / Serper 的字段映射与去重）
  *
  * 运行方式见 package.json 的 smoke 脚本。
  */
@@ -18,6 +19,8 @@ import { validateAndFixCitations } from '../src/core/citations'
 import { hashEmbed, cosineSimilarity } from '../src/core/embedding'
 import { demoDocument } from '../src/core/demo'
 import { chunkText } from '../src/core/knowledge'
+import { webSearch, resetSearchState } from '../src/core/search'
+import searchHandler from '../netlify/edge-functions/search'
 import type { AgentEvent } from '../src/core/types'
 import type { AppSettings } from '../src/core/config'
 
@@ -147,6 +150,191 @@ async function main(): Promise<void> {
   const cited = (state.draft ?? '').match(/\[[A-Z]+\d+_\d+-\d+\]/g) ?? []
   const illegal = cited.map((item) => item.slice(1, -1)).filter((id) => !validIds.has(id))
   check('正文引用全部合法（无幻觉编号）', illegal.length === 0, illegal.length ? `非法：${illegal.slice(0, 5).join(',')}` : `${cited.length} 处引用全部合法`)
+
+  // ---------------------------------------------------------------
+  // 检索层：多后端适配
+  //
+  // 检索是整条链路最容易被外部因素卡住的一环（国际服务常要国外信用卡），
+  // 所以把三个后端的字段映射、去重、优先级、错误分支全部用假响应验证一遍，
+  // 不需要任何真实 API Key，也不发出任何真实网络请求。
+  // 注意：本段会替换 globalThis.fetch，因此必须放在流水线测试之后。
+  // ---------------------------------------------------------------
+  log('')
+  log('=== 检索层：多后端适配（假响应验证字段映射）===')
+
+  const realFetch = globalThis.fetch
+  const calls: { url: string; authorization: string; body: any }[] = []
+
+  const stubFetch = (body: unknown, status = 200): void => {
+    ;(globalThis as any).fetch = async (input: any, init?: any): Promise<Response> => {
+      const url = typeof input === 'string' ? input : String(input?.url ?? '')
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      let parsed: any = {}
+      try {
+        parsed = init?.body ? JSON.parse(String(init.body)) : {}
+      } catch {
+        parsed = {}
+      }
+      calls.push({ url, authorization: headers.Authorization ?? '', body: parsed })
+      return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+    }
+  }
+
+  const postSearch = async (payload: Record<string, unknown>): Promise<{ status: number; data: any }> => {
+    const response = await (searchHandler as any)(
+      new Request('https://smoke.test/api/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }),
+    )
+    return { status: response.status, data: await response.json() }
+  }
+
+  const env = process.env
+
+  // --- 场景 1：只配博查，使用标准顶层结构 ---
+  delete env.TAVILY_API_KEY
+  delete env.SERPER_API_KEY
+  delete env.SEARCH_PROVIDER
+  env.BOCHA_API_KEY = 'sk-smoke-bocha'
+
+  calls.length = 0
+  stubFetch({
+    webPages: {
+      value: [
+        {
+          name: '博查结果一',
+          url: 'https://www.example.com/a',
+          snippet: '片段A',
+          summary: '摘要A',
+          datePublished: '2026-03-01T00:00:00+08:00',
+        },
+        { name: '博查结果二', url: 'https://example.com/b', snippet: '片段B', summary: '', datePublished: '' },
+        { name: '同源重复条目', url: 'http://www.example.com/a', snippet: '重复', summary: '重复摘要', datePublished: '' },
+      ],
+    },
+  })
+
+  const bocha = await postSearch({ query: '企业级 AI Agent 市场规模', count: 5 })
+  check('检索后端：自动选中博查', bocha.data.provider === 'bocha', `provider=${bocha.data.provider}`)
+  check(
+    '检索后端：请求打到博查端点并带上密钥',
+    calls[0]?.url === 'https://api.bochaai.com/v1/web-search' && calls[0]?.authorization === 'Bearer sk-smoke-bocha',
+    `${calls[0]?.url} / ${calls[0]?.authorization}`,
+  )
+  check(
+    '博查字段映射 name→title / summary→content / datePublished→published_date',
+    bocha.data.results?.[0]?.title === '博查结果一' &&
+      bocha.data.results?.[0]?.content === '摘要A' &&
+      bocha.data.results?.[0]?.published_date === '2026-03-01T00:00:00+08:00',
+    JSON.stringify(bocha.data.results?.[0] ?? {}),
+  )
+  check('博查 summary 为空时回退到 snippet', bocha.data.results?.[1]?.content === '片段B', String(bocha.data.results?.[1]?.content))
+  check('按规范化 URL 去重（3 条 → 2 条）', bocha.data.results?.length === 2, `实际 ${bocha.data.results?.length}`)
+  check(
+    '博查请求体使用 count / freshness / summary',
+    calls[0]?.body?.count === 5 && calls[0]?.body?.summary === true && typeof calls[0]?.body?.freshness === 'string',
+    JSON.stringify(calls[0]?.body ?? {}),
+  )
+
+  // --- 场景 2：博查响应被包一层 data（不同版本结构不一致）---
+  stubFetch({
+    code: 200,
+    data: { webPages: { value: [{ name: '包装结构', url: 'https://wrapped.example.com/p', snippet: 'S' }] } },
+  })
+  const wrapped = await postSearch({ query: '包装结构测试', count: 3 })
+  check(
+    '博查兼容 data.webPages 包装结构',
+    wrapped.data.results?.length === 1 && wrapped.data.results?.[0]?.title === '包装结构',
+    JSON.stringify(wrapped.data.results ?? []),
+  )
+
+  // --- 场景 3：博查业务错误码 ---
+  stubFetch({ code: 401, msg: '无效的 API KEY' })
+  const badCode = await postSearch({ query: '错误分支', count: 3 })
+  check(
+    '博查业务错误码转为 502 + upstream_error',
+    badCode.status === 502 && badCode.data.error === 'upstream_error' && String(badCode.data.message).includes('无效的 API KEY'),
+    `${badCode.status} ${badCode.data.error}`,
+  )
+
+  // --- 场景 4：优先级与强制指定 ---
+  env.TAVILY_API_KEY = 'tvly-smoke'
+  calls.length = 0
+  stubFetch({
+    results: [{ title: 'Tavily 结果', url: 'https://tavily.example.com/t', content: '内容T', published_date: '', score: 0.9 }],
+  })
+  const both = await postSearch({ query: '优先级测试', count: 3 })
+  check(
+    '同时配置时按优先级选中 Tavily',
+    both.data.provider === 'tavily' && calls[0]?.url === 'https://api.tavily.com/search',
+    `provider=${both.data.provider}`,
+  )
+  check(
+    'Tavily 的 content 与 score 原样保留',
+    both.data.results?.[0]?.title === 'Tavily 结果' && both.data.results?.[0]?.content === '内容T',
+    JSON.stringify(both.data.results?.[0] ?? {}),
+  )
+
+  env.SEARCH_PROVIDER = 'bocha'
+  calls.length = 0
+  stubFetch({ webPages: { value: [{ name: '强制博查', url: 'https://forced.example.com/f', snippet: 'F' }] } })
+  const forced = await postSearch({ query: '强制指定测试', count: 3 })
+  check(
+    'SEARCH_PROVIDER 可强制覆盖优先级',
+    forced.data.provider === 'bocha' && calls[0]?.url === 'https://api.bochaai.com/v1/web-search',
+    `provider=${forced.data.provider}`,
+  )
+
+  // --- 场景 5：Serper 适配 ---
+  delete env.BOCHA_API_KEY
+  delete env.TAVILY_API_KEY
+  delete env.SEARCH_PROVIDER
+  env.SERPER_API_KEY = 'serper-smoke'
+  calls.length = 0
+  stubFetch({ organic: [{ title: 'Serper 结果', link: 'https://serper.example.com/s', snippet: '内容S', date: '2026-02-02' }] })
+  const serper = await postSearch({ query: 'Serper 测试', count: 3 })
+  check(
+    'Serper 适配 link→url / snippet→content',
+    serper.data.provider === 'serper' &&
+      serper.data.results?.[0]?.url === 'https://serper.example.com/s' &&
+      serper.data.results?.[0]?.content === '内容S',
+    JSON.stringify(serper.data.results?.[0] ?? {}),
+  )
+
+  // --- 场景 6：一个 key 都没有 ---
+  delete env.SERPER_API_KEY
+  const none = await postSearch({ query: '无密钥', count: 3 })
+  check(
+    '无任何检索密钥时返回 401 missing_key',
+    none.status === 401 && none.data.error === 'missing_key',
+    `${none.status} ${none.data.error}`,
+  )
+
+  // --- 场景 7：GET 能力探测（设置面板据此显示后端名）---
+  env.BOCHA_API_KEY = 'sk-smoke-bocha'
+  const probe = await (searchHandler as any)(new Request('https://smoke.test/api/search', { method: 'GET' }))
+  const probeData = await probe.json()
+  check('GET 能力探测返回生效的后端名', probeData.keyConfigured === true && probeData.provider === 'bocha', JSON.stringify(probeData))
+
+  // --- 场景 8：前端客户端把统一格式转成 SourceRecord ---
+  resetSearchState()
+  stubFetch({
+    results: [{ title: '前端映射', url: 'https://news.example.com/x', content: '正文C', published_date: '2026-01-01' }],
+    provider: 'bocha',
+  })
+  const client = await webSearch('前端映射测试', { count: 3 })
+  check(
+    '前端 webSearch 映射为 SourceRecord（域名提取 + source_type）',
+    client.records[0]?.domain === 'news.example.com' &&
+      client.records[0]?.source_type === 'web' &&
+      client.records[0]?.snippet === '正文C',
+    JSON.stringify(client.records[0] ?? {}),
+  )
+  check('前端记录生效的检索后端', client.provider === 'bocha', String(client.provider))
+
+  globalThis.fetch = realFetch
 
   log('')
   log('=== 研报正文片段 ===')

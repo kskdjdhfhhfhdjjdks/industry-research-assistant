@@ -40,7 +40,7 @@
 本项目的解法是**把研究过程显式建模成一条可审计的流水线**：
 
 - **意图分流**——规则引擎 + 模型双模态判断，闲聊/概念问答走快速回答，研究类问题才进重链路；
-- **双源检索**——网络检索（Tavily）与本地知识库（用户导入的研报，pgvector 向量检索）并行召回；
+- **双源检索**——网络检索（后端可插拔：博查 / Tavily / Serper）与本地知识库（用户导入的研报，pgvector 向量检索）并行召回；
 - **证据裁判**——按信源类型打分、去重、标记冲突与证据缺口；
 - **迭代补搜**——分析师评估证据完备性，不足则由反思 Agent 生成新检索词回补，最多 N 轮；
 - **引用强制校验**——来源编号在检索阶段生成，正文里的非法编号由**代码**剔除，不依赖模型自觉；
@@ -83,10 +83,10 @@
             ▼                               ▼
 ┌──────────────── Netlify Edge Functions（只放密钥）─────────────────┐
 │  llm.ts     零拷贝流式代理 · 服务端密钥不下发                        │
-│  search.ts  Tavily 检索代理 · 服务端排序降噪                        │
+│  search.ts  多后端检索代理 · 统一格式 · 按 URL 去重降噪               │
 └───────────┬───────────────────────────────┬─────────────────────────┘
             ▼                               ▼
-      LLM 供应商（DeepSeek 等）          Tavily 检索 API
+      LLM 供应商（DeepSeek 等）      检索 API（博查 / Tavily / Serper）
                                         
             浏览器 ──► Supabase（pgvector 向量检索 / 文档 / 长期记忆）
 ```
@@ -120,7 +120,7 @@ START → intent ─┬─(direct)───────────────�
 | 编排引擎 | 自研 StateGraph（约 150 行） | 对齐 LangGraph 语义，避免引入带 Node 依赖的包 |
 | 服务端 | Netlify Edge Functions（Deno） | 密钥隔离 + 流式代理 |
 | 模型 | DeepSeek（OpenAI 兼容协议） | 可一键切换到通义千问 / Kimi / OpenAI / 自定义端点 |
-| 网络检索 | Tavily Search API | 免费额度 1000 次/月 |
+| 网络检索 | 博查 Bocha / Tavily / Serper（可插拔） | 默认推荐博查：国内合规、支付宝微信可充值、新账号有免费额度 |
 | 向量数据库 | Supabase pgvector（HNSW 索引） | 免费层 500MB |
 | 长期记忆 | Supabase 表 + 向量检索 | 语义记忆 + 情景记忆 |
 | Markdown | markdown-it | `html: false` 防注入，引用角标后处理 |
@@ -133,7 +133,7 @@ START → intent ─┬─(direct)───────────────�
 deepresearch-netlify/
 ├─ netlify/edge-functions/
 │  ├─ llm.ts                  # 零拷贝流式代理（服务端密钥 + 访客自带密钥双通道）
-│  └─ search.ts               # Tavily 检索代理
+│  └─ search.ts               # 多后端检索代理（博查 / Tavily / Serper）
 ├─ supabase/
 │  └─ schema.sql              # pgvector 扩展 / 4 张表 / 2 个检索函数 / RLS 策略
 ├─ src/
@@ -207,13 +207,32 @@ npm run verify       # 类型检查 + 构建 + 上面两项，提交前一键跑
 
 > 换其他家也行：代码只认 `baseUrl + apiKey + model`，设置面板里可切换通义千问 / Kimi / OpenAI，或填任意 OpenAI 兼容端点。
 
-### 2）Tavily —— 提供网络检索
+### 2）网络检索 —— 三选一，任配一个即可
+
+检索层是**可插拔**的：三家后端实现同一套适配器，用哪个由环境变量决定。
+自动探测优先级 **Tavily > 博查 > Serper**；想固定某一家，把 `SEARCH_PROVIDER` 设为 `tavily` / `bocha` / `serper` 即可。
+
+**推荐 · 博查 Bocha（国内合规，不需要国外信用卡）**
+
+1. 打开 <https://open.bochaai.com> 注册（手机号即可）
+2. 左侧 **API KEY 管理** → 新建，复制形如 `sk-xxxxxxxx` 的字符串
+3. 左侧 **资源包管理** → **购买资源包** → 选「免费试用 1,000 次」→ 确认支付（应付 ¥0.00）
+4. 额度用完后可按量续：体验包 1000 次约 ¥3.6，标准包 1000 次 ¥36，支持支付宝/微信
+
+**备选一 · Tavily**（官方定价页明确写着免费版 *No credit card required*，但注册通常要走 Google 账号）
 
 1. 打开 <https://app.tavily.com/home> 注册
 2. 首页即可看到 API Key，形如 `tvly-xxxxxxxx`
 3. 免费额度每月 1000 次检索，单次研究约消耗 5~8 次
 
-> 不配置也能跑：网络检索会退化成内置演示语料，本地知识库链路不受影响。
+**备选二 · Serper**（返回 Google 搜索结果，注册不需要信用卡）
+
+1. 打开 <https://serper.dev> 注册
+2. 首页能看到 API Key，免费额度 2500 次
+
+> **一个实测结论**：网上常见"用公共 SearXNG 实例当零密钥搜索"的建议。我实测了 6 个公共实例（`searx.be`、`priv.au`、`search.inetol.net` 等），**全部不对外开放 JSON 接口**——返回的是 HTML 首页、人机校验页或 429。这条路走不通，别在上面浪费时间。
+
+> 三家都不配也能跑：网络检索会退化成内置演示语料，本地知识库链路不受影响，整条流水线照常执行到底。
 
 ### 3）Supabase —— 提供向量数据库与长期记忆
 
@@ -233,7 +252,13 @@ cp .env.example .env
 
 ```ini
 DEEPSEEK_API_KEY=sk-你的key
-TAVILY_API_KEY=tvly-你的key
+
+# 检索后端三选一，填哪个就用哪个
+BOCHA_API_KEY=sk-你的key        # 博查（推荐，国内可用）
+# TAVILY_API_KEY=tvly-你的key   # Tavily
+# SERPER_API_KEY=你的key        # Serper
+# SEARCH_PROVIDER=bocha          # 可选：强制指定后端
+
 VITE_SUPABASE_URL=https://xxxxxxxx.supabase.co
 VITE_SUPABASE_ANON_KEY=eyJhbGciOi...
 ```
@@ -305,11 +330,16 @@ Netlify 站点 → **Site configuration → Environment variables → Add a vari
 | Key | Value | 是否必填 |
 | --- | --- | --- |
 | `DEEPSEEK_API_KEY` | `sk-...` | 必填（否则进演示模式） |
-| `TAVILY_API_KEY` | `tvly-...` | 可选 |
+| `BOCHA_API_KEY` | `sk-...` | 可选，**推荐的检索后端** |
+| `TAVILY_API_KEY` | `tvly-...` | 可选，检索备选 |
+| `SERPER_API_KEY` | `...` | 可选，检索备选 |
+| `SEARCH_PROVIDER` | `bocha` / `tavily` / `serper` | 可选，留空则按优先级自动选择 |
 | `VITE_SUPABASE_URL` | Supabase Project URL | 可选 |
 | `VITE_SUPABASE_ANON_KEY` | Supabase anon key | 可选 |
 | `LLM_MODEL` | `deepseek-chat` | 可选，默认已是该值 |
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | 可选 |
+
+> **检索只需配一个**。三家都填也行，会按 `Tavily > 博查 > Serper` 的顺序自动挑第一个有 key 的。
 
 > 注意 `VITE_` 前缀的两个变量会被打进前端产物（这是 Vite 的约定）。它们本身是公开信息，安全性由数据库 RLS 保证；其余密钥只在 Edge Function 里通过 `Netlify.env.get()` 读取，**不会进入前端产物**。
 
@@ -332,7 +362,11 @@ Netlify 站点 → **Site configuration → Environment variables → Add a vari
 DEEPSEEK_API_KEY=          # 必填，模型密钥
 LLM_BASE_URL=              # 可选，默认 https://api.deepseek.com/v1
 LLM_MODEL=                 # 可选，默认 deepseek-chat
-TAVILY_API_KEY=            # 可选，网络检索
+
+BOCHA_API_KEY=             # 可选，网络检索（推荐：国内合规，支付宝/微信可充值）
+TAVILY_API_KEY=            # 可选，网络检索（国际，注册常需 Google 账号）
+SERPER_API_KEY=            # 可选，网络检索（Google 结果，备用）
+SEARCH_PROVIDER=           # 可选，强制指定 tavily / bocha / serper
 
 # ---- 前端（构建期注入，公开信息）----
 VITE_SUPABASE_URL=         # 可选
@@ -347,7 +381,7 @@ VITE_SUPABASE_ANON_KEY=    # 可选
 
 > **DeepResearch · 多 Agent 行业深度分析助手**　（在线演示：https://your-site.netlify.app）
 >
-> **技术栈**：Vue 3 · TypeScript · Netlify Edge Functions · Supabase pgvector · DeepSeek · Tavily · Vite
+> **技术栈**：Vue 3 · TypeScript · Netlify Edge Functions · Supabase pgvector · DeepSeek · 博查 Bocha · Vite
 >
 > **项目描述**：面向行业研究场景，解决传统单轮大模型问答"幻觉、覆盖不全、不可溯源"的问题。设计并实现 9 个专家 Agent 的显式状态机协作流水线，自动完成意图路由、双源检索、证据审计、迭代补搜与带引用研报生成。
 >
@@ -373,6 +407,12 @@ A：不指望它自觉。四道闸门：来源编号在检索阶段由代码生�
 **Q：向量检索用的什么方案？为什么选 512 维？**
 A：Supabase pgvector + HNSW 索引。维度选 512 是因为实现了两个可切换的向量后端——默认的「特征哈希向量」（字符/词 n-gram 的 signed hashing + L2 归一化，零依赖零下载、可离线）和可选的「bge-small-zh-v1.5」语义模型（CDN 懒加载）。两者都是 512 维，所以数据库表结构不用改，而且模型下载失败时会自动降级，保证检索链路永远可用。
 
+**Q：检索层为什么做成可插拔的？**
+A：因为检索 API 是最容易被外部因素卡住的一环——国际服务大多要求国外信用卡才能注册，某些服务对国内网络也不友好。我把三家（博查 / Tavily / Serper）收敛成同一套适配器接口，差异（请求参数名、响应字段名、有没有相关性打分、时效字段叫什么）全部封在各自的适配函数里，对外只暴露统一的 `{title, url, content, published_date, score}`。后端由环境变量决定，自动探测也可强制指定，切后端不需要改任何业务代码。顺带在服务端做了按规范化 URL 去重，同一篇文章被不同引擎重复返回时只留分数更高的那条。
+
+**Q：那你是怎么选默认后端的？**
+A：先验证再选，不凭印象。Tavily 官方定价页明确写了免费版 *No credit card required*，所以"国际服务一定要卡"这个假设本身不成立；但注册链路通常要走 Google 账号，对部分开发者仍是障碍。公共 SearXNG 实例曾被考虑作为"零密钥"方案，我实测了 6 个公共实例，全部不对外开放 JSON 接口（返回 HTML、人机校验页或 429），因此排除——不能把一个上线就废的功能写进方案。最终默认推荐博查：国内合规、支付宝/微信可充值、新账号有免费额度，工程风险最低。
+
 **Q：你怎么量化效果？**
 A：把指标定义清楚比跑数字更重要。四个可回归的指标：幻觉率（无来源支撑的结论占比）、引用准确率（引用指向的来源确实支撑该结论的比例）、证据覆盖率（子问题被证据覆盖的比例）、任务完备率（无需人工补搜即可回答全部子问题的比例）。这些指标在界面的运行统计与附录里都能直接看到。
 
@@ -385,6 +425,12 @@ A：说明 Edge Function 没读到 `DEEPSEEK_API_KEY`。检查两点：环境变
 
 **Q：报 401 / missing_key**
 A：同上。若你希望在演示模式之外使用自己的 key，点右上角「设置」填入 API Key，前端会自动降级为直连供应商。
+
+**Q：设置面板里检索代理显示「未配置」，会怎样？**
+A：说明服务端三个检索 key 一个都没配。**博查 / Tavily / Serper 任配一个即可**，配完重新部署一次。三家都不配也不影响主流程——`web_search` 节点会自动切到内置演示语料，本地知识库链路照常工作，整条流水线仍然完整执行到底。
+
+**Q：我在国内，注册不了需要国外信用卡的检索服务怎么办？**
+A：直接用博查（<https://open.bochaai.com>），国内手机号注册，支持支付宝/微信，新账号能领免费额度，见第六章第 2 节。代码层面不需要任何改动——检索后端是靠环境变量切换的。
 
 **Q：本地 `npm run dev` 提示 `/api/llm` 404**
 A：纯 Vite 模式没有边缘函数运行时，属预期行为。用 `npm run dev:netlify` 即可；或在设置里填入自己的 API Key，前端会自动直连。

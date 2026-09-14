@@ -4,7 +4,7 @@ import type { AppSettings } from '@/core/config'
 
 const props = defineProps<{
   settings: AppSettings
-  capability: { llm: boolean; search: boolean; proxyPresent: boolean; probed: boolean }
+  capability: { llm: boolean; search: boolean; searchProvider: string; proxyPresent: boolean; probed: boolean }
   demoMode: boolean
   supabaseEnabled: boolean
   knowledgeSource: 'supabase' | 'local'
@@ -18,6 +18,14 @@ const emit = defineEmits<{
 }>()
 
 const preset = () => PROVIDER_PRESETS.find((item) => item.id === props.settings.providerId)
+
+const SEARCH_PROVIDER_LABELS: Record<string, string> = {
+  bocha: '博查 Bocha',
+  tavily: 'Tavily',
+  serper: 'Serper（Google）',
+}
+
+const searchProviderLabel = () => SEARCH_PROVIDER_LABELS[props.capability.searchProvider] ?? ''
 </script>
 
 <template>
@@ -36,7 +44,7 @@ const preset = () => PROVIDER_PRESETS.find((item) => item.id === props.settings.
         <p class="note" :class="capability.llm ? 'ok' : 'warn'">
           {{ capability.probed ? '' : '探测中…' }}
           模型代理：{{ capability.proxyPresent ? (capability.llm ? '已配置服务端密钥' : '已部署但未配置密钥') : '未部署（当前为纯静态运行）' }}<br />
-          检索代理：{{ capability.search ? '已配置 TAVILY_API_KEY' : '未配置' }}<br />
+          检索代理：{{ capability.search ? `已启用 ${searchProviderLabel() || '检索后端'}` : '未配置（网络检索将退化为内置演示语料）' }}<br />
           {{ demoMode ? '当前运行在「演示模式」：使用内置样例语料与内置模型输出，全链路仍真实执行。' : '当前运行在「真实模式」：调用真实模型与检索 API。' }}
         </p>
       </div>

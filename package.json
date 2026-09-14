@@ -10,9 +10,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "type-check": "vue-tsc --noEmit",
+    "type-check:edge": "tsc -p tsconfig.edge.json",
     "smoke": "node scripts/run-smoke.mjs",
     "smoke:ssr": "node scripts/run-ssr.mjs",
-    "verify": "npm run type-check && npm run build && npm run smoke && npm run smoke:ssr",
+    "verify": "npm run type-check && npm run type-check:edge && npm run build && npm run smoke && npm run smoke:ssr",
     "netlify": "npx netlify-cli"
   },
   "dependencies": {

@@ -84,7 +84,7 @@ export function useResearch() {
   const running = ref(false)
   const route = ref<'direct' | 'multiagent' | ''>('')
   const demoMode = ref(false)
-  const capability = reactive({ llm: false, search: false, proxyPresent: false, probed: false })
+  const capability = reactive({ llm: false, search: false, searchProvider: '', proxyPresent: false, probed: false })
   const usage = reactive({ calls: 0, promptTokens: 0, outputTokens: 0, elapsedMs: 0 })
   const documents = ref<DocumentMeta[]>([])
   const runs = ref<ResearchRun[]>([])
@@ -138,6 +138,7 @@ export function useResearch() {
     let proxyPresent = false
     let llm = false
     let search = false
+    let searchProvider = ''
     try {
       const response = await fetch('/api/llm', { method: 'GET' })
       if (response.ok) {
@@ -151,8 +152,9 @@ export function useResearch() {
     try {
       const response = await fetch('/api/search', { method: 'GET' })
       if (response.ok) {
-        const data = (await response.json()) as { keyConfigured?: boolean }
+        const data = (await response.json()) as { keyConfigured?: boolean; provider?: string }
         search = Boolean(data.keyConfigured)
+        searchProvider = data.provider ?? ''
       }
     } catch {
       search = false
@@ -160,6 +162,7 @@ export function useResearch() {
     capability.proxyPresent = proxyPresent
     capability.llm = llm
     capability.search = search
+    capability.searchProvider = searchProvider
     capability.probed = true
     demoMode.value = !llm && !settings.apiKey
     return { llm, search, proxyPresent }
