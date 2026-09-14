@@ -1,0 +1,28 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# 两个边缘函数：既是密钥代理，也是跨域出口。
+# Edge Functions 的 50ms CPU 限制不包含等待上游的时间，
+# 因此这里可以零拷贝地把大模型的 SSE 流直接透传给浏览器。
+[[edge_functions]]
+  path = "/api/llm"
+  function = "llm"
+
+[[edge_functions]]
+  path = "/api/search"
+  function = "search"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

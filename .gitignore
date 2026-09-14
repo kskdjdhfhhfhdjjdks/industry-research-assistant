@@ -1,0 +1,21 @@
+node_modules
+dist
+dist-ssr
+.netlify
+.env
+.env.local
+.env.*.local
+*.local
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.log
+npm-debug.log*
+yarn-error.log*
+coverage
+
+# 冒烟测试的中间产物（由 scripts/run-*.mjs 生成）
+scripts/.smoke.mjs
+scripts/.ssr
+scripts/ssr-dist

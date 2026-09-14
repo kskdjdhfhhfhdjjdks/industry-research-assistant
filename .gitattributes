@@ -1,0 +1,9 @@
+# 统一换行符，避免 Windows / macOS 协作时出现满屏 CRLF 警告
+* text=auto eol=lf
+
+# 这些是二进制/生成物，不做换行转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.svg text eol=lf
+package-lock.json linguist-generated=true
